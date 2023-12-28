@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from IPython.display import display, Markdown
 from scipy.special import jn
 from scipy.signal import argrelmin
+from scipy.stats import shapiro
 
 
 # Function: processStack
@@ -314,17 +315,6 @@ def print_and_plot_best_fit(params, best_datax, best_datay, interv_q, interv_I):
     plt.legend(fontsize=15)
     plt.show()
 
-    # Bigger Fit chart of the best one
-    # plt.plot(interv_q, interv_I, color='black', label="Experimental data", linewidth=gros)
-    # plt.plot(interv_q, [FourLorentzian(i, params[1][0], params[1][1], params[1][2], params[1][3],) for i in interv_q],
-    #          color='red', label="Fitted data", linewidth=gros, alpha=0.7)
-    # plt.title("4 PARAMETER LORENTZIAN FITTING", fontsize=23)
-    # plt.xlabel("Scattering vector $(nm^{-1})$", fontsize=23)
-    # plt.ylabel("Intensity (a.u.)", fontsize=25)
-    # plt.xticks(fontsize=20)
-    # plt.yticks(fontsize=20)
-    # plt.show()
-
     # Print fitting parameters
     result_str = (
         f"x0: {params[1][2]:.4f}\n"
@@ -347,19 +337,14 @@ def me_struct_params_analysis(me_res):
     """
     # Extract x and y from the results array
     x, y = me_res[0].tolist(), me_res[1].tolist()
-
     # Normalize data
     norm_data = normalize_data(x, y)
-
     # Plot normalized data
     plot_normalized_data(x, norm_data)
-
     # Select center interval and retrieve corresponding data
     datax, datay, interv_q, interv_I, center = select_center_interval(x, norm_data)
-    
     # Perform iterative box selection for fitting
     params, best_datax, best_datay = iterative_box_selection(datax, datay, interv_q, interv_I, center)
-
     # Print fitting parameters, plot the best fit, and a larger fit chart
     print_and_plot_best_fit(params, best_datax, best_datay, x, y)
 
@@ -423,14 +408,12 @@ def perform_data_operations(eq_df, rt=2.48):
     eq_df["F(U)"] = 4.0 * np.pi * rt**3 * (np.sin(eq_df["U"]) - eq_df["U"] * np.cos(eq_df["U"])) / eq_df["U"]**3
     return eq_df
 
-def perform_box_selection(eq_df, left_lim, right_lim):
+def perform_box_selection(eq_df):
     """
     Perform box selection on equatorial data.
 
     Parameters:
     - eq_df (pd.DataFrame): DataFrame containing equatorial data.
-    - left_lim (float): Left limit for box selection.
-    - right_lim (float): Right limit for box selection.
 
     Returns:
     - tuple: Two arrays containing selected data points.
@@ -445,17 +428,24 @@ def perform_box_selection(eq_df, left_lim, right_lim):
     box_start = minims[0][first_valid_min + 2] - 1
     box_end = minims[0][np.abs(minims[0] - (box_start + 60)).argmin()]
 
-    plt.plot(eq_df["R"], eq_df["Normalized to MAX I"])
+    plt.plot(eq_df["R"], eq_df["Normalized to MAX I"], color='black')
     plt.axvline(eq_df["R"][box_start], color='r', linewidth=0.5)
     plt.axvline(eq_df["R"][box_end - 1], color='r', linewidth=0.5)
+    plt.title("NORMALIZED EQUATORIAL PROFILE", fontsize=23)
+    plt.xlabel("Scattering vector $(nm^{-1})$", fontsize=23)
+    plt.ylabel("Intensity (a.u.)", fontsize=25)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
     plt.show()
 
     datax = eq_df["R"][box_start:box_end]
+    global datay
     datay = eq_df["Normalized to MAX I"][box_start:box_end]
+    
 
     return datax, datay
 
-def weighter(Amp, An, rm, n, eq_df):
+def weighter(Amp, An, rm, n, datax):
     """
     Calculate weighter values based on input parameters and equatorial data.
 
@@ -472,19 +462,19 @@ def weighter(Amp, An, rm, n, eq_df):
     Notes:
     - This function calculates weighter values based on input parameters and equatorial data.
     """
-    return Amp * ((jn(0, eq_df["Q"] * rm) * eq_df["F(U)"]) ** 2 +
-                  An * (jn(n, eq_df["Q"] * rm) * eq_df["F(U)"]) ** 2)
+    return Amp * ((jn(0, datax * rm) * datay) ** 2 +
+                  An * (jn(n, datax * rm) * datay) ** 2)
 
-def mix(datax, r, Amp, An, *PN_values):
+def mix(datax, r, Amp, An, *PFN_values):
     """
     Mix and calculate values based on input parameters and data.
 
     Parameters:
-    - datax (array): Array of data points.
+    - datax (array): q data points.
     - r (float): Microtubule radius.
-    - Amp (float): Amplitude value.
-    - An (float): .
-    - PN_values (tuple): Tuple of PN values.
+    - Amp (float): Contribution of the Bessel function of order 0.
+    - An (float): Contribution of the Bessel function of order n.
+    - PN_values (tuple): Protofilament proportion.
 
     Returns:
     - float: Calculated value.
@@ -492,68 +482,128 @@ def mix(datax, r, Amp, An, *PN_values):
     Notes:
     - This function mixes and calculates values based on input parameters and data.
     """
+
+    # Define ipfd limits.
     left_lim = 5.3
     right_lim = 5.7
-    rr = {i + 10: value for i, value in enumerate(PN_values)}
-    sumPn = sum(rr.values())
-    AvgN = sum(i * rr[i] * 100 for i in rr) / 100
-    ipfd = 2 * np.sin((2 * np.pi / AvgN) / 2) * r
+    pfn_distribution = [9, 10, 11, 12, 13]
 
-    if left_lim <= ipfd <= right_lim:
+    sumPn = np.array(PFN_values).sum()
+    rr = {}
+    for i in range(len(PFN_values)):
+        rr[pfn_distribution[i]] = PFN_values[i]/sumPn
+    AvgN = np.array([i * rr[i] * 100 for i in rr]).sum() / 100
+    ipfd = 2 * np.sin( (2 * np.pi / AvgN) / 2 ) * r
+    stat, p_value = shapiro(PFN_values)
+    alpha = 0.05
+    if ipfd >= left_lim and ipfd <= right_lim and p_value > alpha:
         suma = 0
         for i in rr:
-            rm = r / AvgN * i
-            suma += rr[i] * weighter(Amp, An, rm, i, eq_df)
-        return suma
+            rm = r /AvgN * i
+            suma += rr[i] * weighter(Amp, An, rm, i, datax)
+        return(suma)
     else:
-        return 10e5**ipfd
+        return(10e5**ipfd)
 
-def perform_curve_fit(datax, datay):
-    popt, pcov = curve_fit(mix, datax, datay, p0=[12, 1, 1, 1, 1, 1, 1, 1, 1],
-                           check_finite=True, method='trf',
-                           bounds=[(7., 0., 0., 0., 0., 0., 0., 0., 0.),
-                                   (15., 5., 5., 5., 5., 5., 5., 5., 5.)])
-    ### Fitted vs Experimental data comparison.
-    # print(datax, mix(datax, *popt))
-    # plt.plot(datax, mix(datax, *popt), 'r-',
-    #          label='fit: r=%5.3f, Amp=%5.3f, An=%5.3f, PN10=%5.3f, PN11=%5.3f, PN12=%5.3f, PN13=%5.3f, PN14=%5.3f, PN15=%5.3f' % tuple(popt))
-    # plt.plot(datax, datay)
-    # plt.title("Cambiar título en línea 520")
-    # plt.legend()
-    # plt.show()
+def perform_curve_fit(datax, datay, p_d):
+    """
+    Perform a curve fit using the mix function.
+
+    Parameters:
+    - datax (array): q data points.
+    - datay (array): Experimental data points.
+    - p_d (list): List of protofilament proportions.
+
+    Returns:
+    - array: Optimal values for the parameters so that the sum of the squared residuals of mix(x, *popt) - datay is minimized.
+
+    Notes:
+    - This function performs a curve fit using the mix function and the specified parameters.
+    - It plots the fitted data and the experimental data for comparison.
+    """
+    # Define initial parameters and bounds
+    initial_p = [12, 1, 1]
+    initial_bounds1 = [9., 0., 0.]
+    initial_bounds2 = [15., 5., 5.]
+    for i in p_d:
+        initial_p.append(1)
+        initial_bounds1.append(0.)
+        initial_bounds2.append(10.)
+
+    # Perform curve fit
+    popt, pcov = curve_fit(mix, datax, datay, p0=initial_p, check_finite=True, method='trf',
+                           bounds=[tuple(initial_bounds1), tuple(initial_bounds2)])
+
+    # Plot fitted and experimental data for comparison
+    sumPn2 = np.array([popt[3], popt[4], popt[5], popt[6], popt[7]]).sum()
+    rr2 = {10: popt[3]/sumPn2, 11: popt[4]/sumPn2, 12: popt[5]/sumPn2, 13: popt[6]/sumPn2, 14: popt[7]/sumPn2}
+    AvgN2 = np.array([i * rr2[i] * 100 for i in rr2]).sum() / 100
+    ipfd = 2 * np.sin((2 * np.pi / AvgN2) / 2) * popt[0]
+
+    plt.plot(datax, mix(datax, *popt), 'r-',
+             label='fitted data: r=%5.3f, ipfd=%5.3f, Avg PFn=%5.3f' % (popt[0], ipfd, AvgN2))
+    plt.plot(datax, datay, color='black')
+    plt.title("FITTED AND EXPERIMENTAL DATA")
+    plt.xlabel("Scattering vector $(nm^{-1})$", fontsize=23)
+    plt.ylabel("Intensity (a.u.)", fontsize=25)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
+    plt.legend()
+    plt.show()
 
     return popt
 
-def print_fitting_results(popt):
-    sumPn = np.array([popt[3], popt[4], popt[5], popt[6], popt[7], popt[8]]).sum()
-    # rr = {10: popt[3] / sumPn, 11: popt[4] / sumPn, 12: popt[5] / sumPn,
-    #       13: popt[6] / sumPn, 14: popt[7] / sumPn, 15: popt[8] / sumPn}
-    # AvgN = np.array([i * rr[i] * 100 for i in rr]).sum() / 100
+def print_fitting_results(popt, datax, datay):
+    """
+    Print fitting results and display a bar plot of the fitted protofilament distribution.
 
-    # print('fit: r=%5.3f, Amp=%5.3f, An=%5.3f, PN10=%5.3f, PN11=%5.3f, PN12=%5.3f, PN13=%5.3f, PN14=%5.3f, PN15=%5.3f' % tuple(popt))
-    # print('PN10=%5.3f, PN11=%5.3f, PN12=%5.3f, PN13=%5.3f, PN14=%5.3f, PN15=%5.3f' % tuple(rr.values()))
-    # ipfd = 2 * np.sin((2 * np.pi / AvgN) / 2) * popt[0]
-    # print(ipfd)
+    Parameters:
+    - popt (array): Optimal values for the parameters obtained from curve fitting.
+    - datax (array): q data points.
+    - datay (array): Experimental data points.
 
-    # plt.bar(rr.keys(), rr.values())
-    # plt.show()
-
-    sumPn2 = np.array([popt[3], popt[4], popt[5], popt[6], popt[7], popt[8]]).sum()
-    rr2 = {10:popt[3]/sumPn2, 11:popt[4]/sumPn2, 12:popt[5]/sumPn2, 13:popt[6]/sumPn2, 14:popt[7]/sumPn2, 15:popt[8]/sumPn2}
+    Returns:
+    - None: The function prints the fitting results and displays a bar plot of the fitted protofilament distribution.
+    """
+    sumPn2 = np.array([popt[3], popt[4], popt[5], popt[6], popt[7]]).sum()
+    rr2 = {10: popt[3]/sumPn2, 11: popt[4]/sumPn2, 12: popt[5]/sumPn2, 13: popt[6]/sumPn2, 14: popt[7]/sumPn2}
     AvgN2 = np.array([i * rr2[i] * 100 for i in rr2]).sum() / 100
-    ipfd = 2 * np.sin( (2 * np.pi / AvgN2) / 2 ) * popt[0]
-    s1 = " - "
+    ipfd = 2 * np.sin((2 * np.pi / AvgN2) / 2) * popt[0]
+
     plt.bar(rr2.keys(), rr2.values())
+    for key, value in rr2.items():
+        plt.text(key, value, f'{value*100:.3f}', ha='center', va='bottom')
+    plt.title("FITTED PROTOFILAMENT DISTRIBUTION", fontsize=23)
+    plt.xlabel("Number of protofilaments", fontsize=23)
+    plt.ylabel("Percentage (%)", fontsize=25)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
     plt.show()
 
-def eq_struct_params_analysis(eq_res, left_lim=5.3, right_lim=5.7):
+
+def eq_struct_params_analysis(eq_res, p_d):
+    """
+    Analyze equatorial structural parameters using curve fitting.
+
+    Parameters:
+    - eq_res (tuple): Tuple containing equatorial structural parameters (x, y).
+    - p_d (list): List of the possible protofilament numbers.
+
+    Returns:
+    - None: The function analyzes equatorial structural parameters using curve fitting and displays the results.
+    """
+    # Extract x and y from the results array
     x, y = eq_res[0].tolist(), eq_res[1].tolist()
+    # Create equatorial dataframe and perform necessary operations
     eq_df = create_equatorial_dataframe(x, y)
     eq_df = normalize_eq_data(eq_df)
     eq_df = perform_data_operations(eq_df)
-    datax, datay = perform_box_selection(eq_df, left_lim, right_lim)
-    popt = perform_curve_fit(datax, datay)
-    print_fitting_results(popt)
+    # Perform box selection for fitting
+    datax, datay = perform_box_selection(eq_df)
+    # Perform curve fit and print results
+    popt = perform_curve_fit(datax, datay, p_d)
+    print_fitting_results(popt, datax, datay)
+
 
 
 
